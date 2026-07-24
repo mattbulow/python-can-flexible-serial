@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flexible_serial"
+version = "0.0.0"
+description = "Template python-can serial interface plugin"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "python-can>=4.4,<5",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.entry-points."can.interface"]
+flexible_serial = "flexible_serial.bus:FlexibleSerial"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
