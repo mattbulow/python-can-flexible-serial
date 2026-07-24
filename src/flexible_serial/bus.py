@@ -1,10 +1,15 @@
 """
-A text based interface. For example use over serial ports like
-"/dev/ttyS1" or "/dev/ttyUSB0" on Linux machines or "COM1" on Windows.
-The interface is a simple implementation that has been used for
-recording CAN traces.
+A python-can interface plugin for a configurable, framed binary protocol
+over a serial port. For example use over serial ports like "/dev/ttyS1" or
+"/dev/ttyUSB0" on Linux machines or "COM1" on Windows.
 
-See the interface documentation for the format being used.
+Unlike python-can's fixed-layout ``serial``/``slcan`` interfaces, the frame
+layout (SOF/EOF delimiters, ID width, optional CRC, optional flags byte,
+optional timestamp) is configurable via constructor kwargs so it can be
+matched to firmware on the other end of the link. See the README for the
+full frame layout and kwarg reference, and
+https://python-can.readthedocs.io/en/stable/plugin-interface.html for the
+python-can plugin interface this implements.
 """
 
 import io
@@ -52,26 +57,20 @@ FLAG_BYTE_FD        = 0x08
 FLAG_BYTE_FD_BRS    = 0x10
 FLAG_BYTE_IS_RX     = 0x20
 
+MAX_DATA_LEN_CLASSIC = 8
+MAX_DATA_LEN_FD = 64
+
 '''
-Frame Layout:
+Frame Layout (see README.md for the full reference):
 - SOF           -> 1 or more bytes
 HEADER
-- timestamp     -> options: 0 or 4 bytes
+- timestamp     -> options: 0 or 4 bytes, uint32 milliseconds
 - dlc           -> 1 byte
 - flags byte    -> options 0 or 1 byte
 - id            -> options 2 or 4 bytes
 DATA PAYLOAD    -> 0 - 64 bytes
 - CRC           -> optional (0 or some num of bytes)
 - EOF           -> 1 or more bytes
-'''
-
-'''
-TODO: improvements
-- why was filters removed? can_filters
-- Support can FD protocol for busABC parent
-- Support channel-filers for 'hw' filtering, where messages can be dropped before crc checks (add _apply_filters() method)
-- add documentation for what kwargs are available
-- document that timestamp is in ms, or add an option for timestamp gain
 '''
 
 class TimeoutTimer():
@@ -114,7 +113,7 @@ class FlexibleSerial(BusABC):
 
     ERROR_TEXT = {
         SerialError.DESYNC: "Start-of-Frame desync",
-        SerialError.BAD_DLC: "DataLength Invalid (>64 bytes)",
+        SerialError.BAD_DLC: f"DataLength Invalid (>{MAX_DATA_LEN_FD} bytes)",
         SerialError.BAD_EOF: "End-of-Frame mismatch",
         SerialError.BAD_CRC: "CRC Error",
     }
@@ -122,6 +121,19 @@ class FlexibleSerial(BusABC):
     CRC_TYPES = frozenset({"none","crc16-ccitt"})
 
     class FrameKwargs(TypedDict):
+        """Constructor kwargs controlling the wire frame layout.
+
+        :ivar big_endian: Byte order for header/CRC fields.
+        :ivar sof: Start-of-frame delimiter (bytes, or hex string from CLI kwargs).
+        :ivar eof: End-of-frame delimiter (bytes, or hex string from CLI kwargs).
+        :ivar uint16_id: Use a 2-byte arbitration ID instead of 4-byte; rejects extended IDs.
+        :ivar crc_type: One of :attr:`CRC_TYPES` (``"none"``, ``"crc16-ccitt"``).
+        :ivar flags_byte: Carry extended/error/remote/FD metadata in a dedicated header byte.
+        :ivar no_timestamp: Omit the 4-byte (uint32 milliseconds) timestamp header field.
+        :ivar rx_bytes_callback: ``callback(raw_bytes, is_rx)`` invoked for every
+            frame written or chunk of buffer consumed while reading; useful for
+            logging/debugging raw wire traffic.
+        """
         big_endian: bool
         sof: bytes
         eof: bytes
@@ -172,7 +184,12 @@ class FlexibleSerial(BusABC):
             Turn hardware handshake (RTS/CTS) on and off (default false)
 
         :param kwargs:
-            Passed to base class constructor, see :meth:`can.BusABC.__init__`
+            Frame-layout options (see :class:`FrameKwargs` and
+            :attr:`DEFAULT_FRAME_KWARGS` for defaults), plus any remaining
+            kwargs passed to the base class constructor, see
+            :meth:`can.BusABC.__init__`. All frame-layout kwargs accept
+            hex strings (e.g. ``"0xAA"``) in addition to their native type,
+            since python-can CLI tools pass ``--bus-kwargs`` as strings.
 
         :raises ~can.exceptions.CanInitializationError:
             If the given parameters are invalid.
@@ -189,7 +206,7 @@ class FlexibleSerial(BusABC):
 
         self.channel = channel
         self.channel_info = f"Flexible serial interface: {channel}"
-        self._can_protocol = CanProtocol.CAN_20  # TODO: maybe support CAN FD also
+        self._can_protocol = CanProtocol.CAN_20
 
         self._rx_buffer = bytearray()
 
@@ -684,8 +701,7 @@ class FlexibleSerial(BusABC):
             arbitration_id = arbitration_id & CAN_ID_MASK_STD
 
         # Validate DLC before trusting it as the payload length.
-        # TODO: add option for any data length (up to 255 since dlc is only 1 byte, this would be for arbitrary serial data that is not nessarily CAN, but will still work using python-can)
-        if dlc > (64 if is_can_fd else 8):
+        if dlc > (MAX_DATA_LEN_FD if is_can_fd else MAX_DATA_LEN_CLASSIC):
             if self._on_data_processed_callback:
                 self._on_data_processed_callback(self._rx_buffer[0], True)
             del self._rx_buffer[0]
